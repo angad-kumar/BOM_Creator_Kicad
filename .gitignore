@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+Thumbs.db
+*.kicad_pcb
+*.kicad_pro
+*.kicad_sch
+*.bak
+*-bak/
+fp-info-cache
