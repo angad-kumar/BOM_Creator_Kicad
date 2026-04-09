@@ -51,6 +51,8 @@ Open a terminal and run:
 ```bash
 pip install playwright
 playwright install chromium
+           or
+python -m playwright install chromium
 ```
 
 > **Windows users:** Use the system terminal where KiCad's Python is on the PATH.
