@@ -225,6 +225,8 @@ Make sure Playwright and Chromium are installed:
 ```bash
 pip install playwright
 playwright install chromium
+        or
+python -m playwright install chromium
 ```
 
 ### Images not loading
