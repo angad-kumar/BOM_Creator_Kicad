@@ -5,6 +5,7 @@ Modern, Clean UI Version with Currency, Filtering, Theme Support, HD Image Previ
 """
 
 import pcbnew
+import os
 import wx
 import threading
 import json
@@ -25,6 +26,22 @@ except ImportError:
 if not wx.Image.FindHandler(wx.BITMAP_TYPE_JPEG):
     wx.InitAllImageHandlers()
 
+
+class BOMCreatorPlugin(pcbnew.ActionPlugin):
+    def defaults(self):
+        # Details that appear in the KiCad menu
+        self.name = "BOM Creator"
+        self.category = "BOM"
+        self.description = "Search LCSC, Assign Components, Export BOM"
+        self.show_toolbar_button = True
+        
+        # Resolves the absolute path to your icon
+        self.icon_file_name = os.path.join(os.path.dirname(__file__), 'icon.png')
+
+    def Run(self):
+        # This method is executed when the user clicks the toolbar icon.
+        # Initialize your UI, Playwright instances, and processing logic here.
+        pass
 # ══════════════════════════════════════════════════════════════════════════════
 #  Theme Definitions
 # ══════════════════════════════════════════════════════════════════════════════
