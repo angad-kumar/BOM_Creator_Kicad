@@ -1,11 +1,11 @@
 import os
+import traceback
 """
 KiCad Plugin: LCSC Component Search & Footprint Updater
 Modern, Clean UI Version with Currency, Filtering, Theme Support, HD Image Previews & Auto-DNP Sync
 """
 
 import pcbnew
-import os
 import wx
 import threading
 import json
@@ -14,7 +14,6 @@ import io
 import urllib.parse
 import urllib.request
 import ssl
-import pcbnew; pcbnew.LoadPlugins()
 
 try:
     from playwright.sync_api import sync_playwright
@@ -22,26 +21,7 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-# Initialize wx image handlers globally just in case
-if not wx.Image.FindHandler(wx.BITMAP_TYPE_JPEG):
-    wx.InitAllImageHandlers()
 
-
-class BOMCreatorPlugin(pcbnew.ActionPlugin):
-    def defaults(self):
-        # Details that appear in the KiCad menu
-        self.name = "BOM Creator"
-        self.category = "BOM"
-        self.description = "Search LCSC, Assign Components, Export BOM"
-        self.show_toolbar_button = True
-        
-        # Resolves the absolute path to your icon
-        self.icon_file_name = os.path.join(os.path.dirname(__file__), 'icon.png')
-
-    def Run(self):
-        # This method is executed when the user clicks the toolbar icon.
-        # Initialize your UI, Playwright instances, and processing logic here.
-        pass
 # ══════════════════════════════════════════════════════════════════════════════
 #  Theme Definitions
 # ══════════════════════════════════════════════════════════════════════════════
@@ -192,19 +172,26 @@ def search_lcsc(keyword, max_results=15):
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
+        # Block actual image downloading to keep search fast, but allow DOM to load attributes
         page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["media", "font"] else route.continue_())
         page.set_extra_http_headers({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)", "Accept-Language": "en-US,en;q=0.9"})
         page.goto(url, wait_until="domcontentloaded", timeout=20000)
         page.wait_for_selector("tbody tr", timeout=12000)
 
+        # NEW: Act like a human to trigger LCSC's lazy-loaded images
         try:
-            page.evaluate("""
+            page.evaluate("""async () => {
                 let rows = document.querySelectorAll('tbody tr');
-                if(rows.length > 5) {
-                    rows[5].scrollIntoView();
+                for(let i=0; i < Math.min(rows.length, 15); i++) {
+                    // Scroll to the row
+                    rows[i].scrollIntoView({block: 'center'});
+                    // Simulate mouse hover
+                    rows[i].dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+                    rows[i].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                    // Wait 50ms for the UI to react and inject the image
+                    await new Promise(r => setTimeout(r, 50)); 
                 }
-            """)
-            page.wait_for_timeout(1000)
+            }""")
         except Exception:
             pass
 
@@ -216,30 +203,41 @@ def search_lcsc(keyword, max_results=15):
                 if(cells.length < 8) continue;
                 
                 let img_url = "";
-                let bgDiv = cells[1].querySelector('.v-image__image');
-                if (bgDiv) {
-                    let style = bgDiv.getAttribute('style') || "";
-                    let match = style.match(/url\\([^)]+\\)/);
-                    if (match) img_url = match[0].replace(/url\\(|&quot;|"|'|\\)/g, '');
+                
+                // Aggressive search: Look everywhere in the row for an image (LCSC moves it around)
+                let imgs = row.querySelectorAll('img');
+                for (let img of imgs) {
+                    let src = img.getAttribute('src') || img.getAttribute('data-src') || img.getAttribute('lazy-src') || "";
+                    if (src && src.match(/\.(jpg|png|jpeg|webp)/i) && !src.includes('rohs') && !src.includes('pdf') && !src.includes('hot')) {
+                        img_url = src;
+                        break;
+                    }
                 }
                 
+                // Backup check for CSS background images
                 if (!img_url) {
-                    let imgs = cells[1].querySelectorAll('img');
-                    for(let img of imgs) {
-                        let src = img.getAttribute('data-src') || img.getAttribute('lazy-src') || img.getAttribute('src') || "";
-                        if(src && !src.includes('pdf') && !src.includes('rohs') && !src.includes('hot')) {
-                            img_url = src;
-                            break;
+                    let els = row.querySelectorAll('*');
+                    for (let el of els) {
+                        let style = el.getAttribute('style') || "";
+                        let match = style.match(/url\\([^)]+\\)/);
+                        if (match) {
+                            let extracted = match[0].replace(/url\\(|&quot;|"|'|\\)/g, '');
+                            if (extracted.match(/\.(jpg|png|jpeg|webp)/i) && !extracted.includes('pdf')) {
+                                img_url = extracted;
+                                break;
+                            }
                         }
                     }
                 }
                 
+                // Format the extracted URL securely
                 if (img_url) {
                     if (img_url.startsWith('//')) img_url = 'https:' + img_url;
                     else if (img_url.startsWith('/')) img_url = 'https://www.lcsc.com' + img_url;
                     if (img_url.includes('?')) img_url = img_url.split('?')[0];
                 }
                 
+                // Extract standard text components
                 let raw_mpn = cells[1].innerText.trim().replace(/\\n/g, "|");
                 let mfr = cells[2].innerText.trim().replace(/\\n/g, " ");
                 let avail = cells[3].innerText.trim().replace(/\\n/g, " ");
@@ -275,7 +273,6 @@ def search_lcsc(keyword, max_results=15):
         
     parsed_parts.sort(key=lambda x: x["stock"], reverse=True)
     return parsed_parts[:max_results]
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  KiCad Footprint Helpers
@@ -389,8 +386,6 @@ class LCSCSearchFrame(wx.Frame):
             size=(1250, 750)
         )
         self.SetMinSize((1000, 550))
-        
-        wx.InitAllImageHandlers()
 
         self.footprints      = footprints
         self.results         = []
@@ -1360,7 +1355,7 @@ class BOMExportDialog(wx.Dialog):
             refs      = ", ".join(g["refs"])
             qty       = len(g["refs"])
             total_parts += qty
-            all_dnp   = len(g["dnp_refs"]) == qty         
+            all_dnp   = len(g["dnp_refs"]) == qty        
             some_dnp  = bool(g["dnp_refs"]) and not all_dnp
             
             dnp_label = " (DNP)" if all_dnp else (f" (DNP:{','.join(g['dnp_refs'])})" if some_dnp else "")
@@ -1423,10 +1418,10 @@ class BOMExportDialog(wx.Dialog):
 #  Plugin registration
 # ══════════════════════════════════════════════════════════════════════════════
 
-class LCSCFootprintPlugin(pcbnew.ActionPlugin):
+class BOMCreatorPlugin(pcbnew.ActionPlugin):
     def defaults(self):
         self.name        = "BOM Creator"
-        self.category    = "Edit"
+        self.category    = "BOM"
         self.description = "Search LCSC for components, assign MPN / LCSC PN / Manufacturer / Description to footprints, and export grouped BOM."
         self.show_toolbar_button = True
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
@@ -1434,13 +1429,38 @@ class LCSCFootprintPlugin(pcbnew.ActionPlugin):
             self.icon_file_name = icon_path
 
     def Run(self):
-        board = pcbnew.GetBoard()
-        footprints = sorted([(fp.GetReference(), fp) for fp in board.GetFootprints()], key=lambda x: x[0])
-        if not footprints:
-            wx.MessageBox("No footprints on board.", "LCSC Search", wx.OK | wx.ICON_INFORMATION)
-            return
-        
-        frame = LCSCSearchFrame(None, footprints)
-        frame.Show()
+        try:
+            # Safely initialize wx images here when we know KiCad GUI is ready
+            if not wx.Image.FindHandler(wx.BITMAP_TYPE_JPEG):
+                wx.InitAllImageHandlers()
 
-LCSCFootprintPlugin().register()
+            board = pcbnew.GetBoard()
+            if board is None:
+                wx.MessageBox("No board open.", "Error", wx.OK | wx.ICON_ERROR)
+                return
+
+            footprints = sorted(
+                [(fp.GetReference(), fp) for fp in board.GetFootprints()],
+                key=lambda x: x[0]
+            )
+
+            if not footprints:
+                wx.MessageBox("No footprints found on this board.", "LCSC Search", wx.OK | wx.ICON_INFORMATION)
+                return
+            
+            # Find the parent window safely instead of relying on GetFrame()
+            parent = None
+            for win in wx.GetTopLevelWindows():
+                if win.GetTitle().lower().startswith('pcb editor'):
+                    parent = win
+                    break
+            
+            # Use self._frame to prevent the window from being destroyed instantly
+            self._frame = LCSCSearchFrame(parent, footprints)
+            self._frame.Show()
+            
+        except Exception as e:
+            err_msg = traceback.format_exc()
+            wx.MessageBox(f"Plugin crashed during startup:\n\n{err_msg}", "BOM Creator Error", wx.OK | wx.ICON_ERROR)
+
+BOMCreatorPlugin().register()
